@@ -1,43 +1,63 @@
-mod storage;
+use std::borrow::Borrow;
+use poem::{get, handler, listener::TcpListener, Route, Server, IntoResponse, EndpointExt};
+use poem::web::{Path, Json, Data, websocket::WebSocket};
+use poem::web::websocket::Message;
+use serde::{Serialize, Deserialize};
 
-#[macro_use] extern crate rocket;
-
-use rocket::{Build, Rocket};
-use rocket::serde::json::Json;
-use rocket::serde::{Deserialize, Serialize};
-
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(crate = "rocket::serde")]
+#[derive(Serialize, Deserialize)]
 struct Tank<> {
     name: String
 }
 
-#[get("/")]
+#[handler]
 fn get_tanks() -> &'static str {
-    //storage::TANKS.iter().keys();
-
     "Here is a list of tanks"
 }
 
-#[get("/<name>")]
-fn get_tank(name: &str) -> String {
+#[handler]
+fn get_tank(Path(name): Path<String>) -> String {
      format!("Here is tank {}", name)
 }
 
-#[get("/<name>/devices")]
-fn get_tank_devices(name: &str) -> String {
+#[handler]
+fn get_tank_devices(Path(name): Path<String>) -> String {
     format!("Here is a list of devices attached to tank {}", name)
 }
 
-#[put("/", format = "json", data = "<tank>")]
-fn put_tank(tank: Json<Tank>) -> String {
-    let name = &tank.name;
-    name.to_string()
+#[handler]
+fn put_tank(tank: Json<Tank>) -> Json<Tank> {
+    tank
 }
 
-#[launch]
-fn rocket() -> Rocket<Build> {
-    rocket::build()
-        .mount("/tanks", routes![get_tanks, get_tank, get_tank_devices, put_tank])
+#[handler]
+fn ws(ws: WebSocket, sender: Data<&tokio::sync::broadcast::Sender<String>>) -> impl IntoResponse {
+
+    let mut receiver = sender.subscribe();
+    let sender = sender.clone();
+    ws.on_upgrade(move |socket| async move {
+        let mut stream = socket;
+
+        tokio::spawn(async move {
+            while let Some(Ok(msg)) = stream.next().await {
+                if let Message::Text(text) = msg {
+                    if sender.send(format!("{}", text)).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), std::io::Error> {
+    let app = Route::new()
+        .at("/", get(ws.data(tokio::sync::broadcast::channel::<String>(32).0)))
+        .at("/tanks", get(get_tanks).put(put_tank))
+        .at("/tanks/:name", get(get_tank))
+        .at("/tanks/:name/devices", get(get_tank_devices));
+
+    Server::new(TcpListener::bind("127.0.0.1:3000"))
+        .run(app)
+        .await
 }
